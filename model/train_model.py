@@ -1,148 +1,121 @@
-import librosa
-import numpy as np
-import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.model_selection import train_test_split
+from torchvision import datasets, transforms
+from torch.utils.data import DataLoader
 from sklearn.metrics import classification_report
-from sklearn.preprocessing import LabelEncoder
+import numpy as np
 
-# Set seeds for reproducibility
-torch.manual_seed(42)
-np.random.seed(42)
+# Config
+BATCH_SIZE = 32
+EPOCHS = 50
+LEARNING_RATE = 0.00001
+NUM_CLASSES = 10
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 1. Feature Extraction
-def extract_features(audio_path):
-    y, sr = librosa.load(audio_path, sr=22050)
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
-    features = np.concatenate((
-        np.mean(mfcc, axis=1),
-        np.std(mfcc, axis=1),
-        np.min(mfcc, axis=1),
-        np.max(mfcc, axis=1),
-    ))
-    return features
+# Transformations
+transform = transforms.Compose([
+    transforms.Grayscale(),
+    transforms.Resize((128, 128)),
+    transforms.ToTensor()
+])
 
-# 2. Dataset Preparation
-def prepare_dataset(dataset_path):
-    genres = os.listdir(dataset_path)
-    features, labels = [], []
-    for genre in genres:
-        genre_path = os.path.join(dataset_path, genre)
-        if os.path.isdir(genre_path):
-            for file in os.listdir(genre_path):
-                if file.endswith('.wav'):
-                    audio_path = os.path.join(genre_path, file)
-                    try:
-                        feature = extract_features(audio_path)
-                        features.append(feature)
-                        labels.append(genre)
-                    except Exception as e:
-                        print(f"Error processing {audio_path}: {e}")
-    return np.array(features), np.array(labels)
+# Dataset
+dataset = datasets.ImageFolder("spectrograms", transform=transform)
+class_names = dataset.classes
 
-# Load data
-dataset_path = 'dataset/genres_original'
-X, y = prepare_dataset(dataset_path)
+# Train/val split
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
+train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
+val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE)
 
-# Encode labels
-le = LabelEncoder()
-y_encoded = le.fit_transform(y)
-
-# Split data
-X_train, X_test, y_train, y_test = train_test_split(X, y_encoded, test_size=0.2, random_state=42)
-
-# Convert to PyTorch tensors
-X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
-y_train_tensor = torch.tensor(y_train, dtype=torch.long)
-X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
-y_test_tensor = torch.tensor(y_test, dtype=torch.long)
-
-# 3. Define Model
-class GenreClassifier(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super(GenreClassifier, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+class CNNGenreClassifier(nn.Module):
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Dropout(0.4),
-
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
+            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Dropout(0.4),
+            nn.MaxPool2d(2),
+            nn.Dropout(0.3),
 
-            nn.Linear(hidden_dim, output_dim)
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(0.3),
+
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+            nn.Dropout(0.3)
+        )
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 16 * 16, 512),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(512, num_classes)
         )
 
     def forward(self, x):
-        return self.net(x)
+        return self.classifier(self.features(x))
 
-# Model parameters
-input_dim = X_train.shape[1]  # e.g., 13 MFCCs
-hidden_dim = 128
-output_dim = len(np.unique(y_encoded))  # 10 genres
 
-# Initialize model
-model = GenreClassifier(input_dim, hidden_dim, output_dim)
 
-# 4. Training Setup
+# Initialize
+model = CNNGenreClassifier().to(DEVICE)
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.0005)
-epochs = 200
+#optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+optimizer = optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
 
-# 5. Training Loop
-best_loss = float('inf')
-patience = 10
-trigger_times = 0
-
-for epoch in range(epochs):
+# Training loop
+best_acc = 0
+for epoch in range(EPOCHS):
     model.train()
-    optimizer.zero_grad()
-    outputs = model(X_train_tensor)
-    loss = criterion(outputs, y_train_tensor)
-    loss.backward()
-    optimizer.step()
+    total_loss = 0
+    for X_batch, y_batch in train_loader:
+        X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
+        optimizer.zero_grad()
+        outputs = model(X_batch)
+        loss = criterion(outputs, y_batch)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item()
 
+    # Validation
     model.eval()
-    val_outputs = model(X_test_tensor)
-    val_loss = criterion(val_outputs, y_test_tensor).item()
+    correct, total = 0, 0
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        for X_batch, y_batch in val_loader:
+            X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
+            outputs = model(X_batch)
+            _, predicted = torch.max(outputs, 1)
+            total += y_batch.size(0)
+            correct += (predicted == y_batch).sum().item()
+            y_true.extend(y_batch.cpu().numpy())
+            y_pred.extend(predicted.cpu().numpy())
 
-    if val_loss < best_loss:
-        best_loss = val_loss
-        trigger_times = 0
-        torch.save(model.state_dict(), "best_model.pth")  # save best model
-    else:
-        trigger_times += 1
-        if trigger_times >= patience:
-            print(f"Early stopping at epoch {epoch + 1}")
-            break
+    acc = correct / total
+    print(f"Epoch {epoch+1}/{EPOCHS}, Loss: {total_loss:.4f}, Val Acc: {acc:.4f}")
 
-    if (epoch + 1) % 10 == 0 or epoch == 0:
-        print(f"Epoch [{epoch+1}/{epochs}], Loss: {loss.item():.4f}, Val Loss: {val_loss:.4f}")
+    if acc > best_acc:
+        best_acc = acc
+        torch.save(model.state_dict(), "model/saved/best_cnn_model.pth")
+        print("✅ Saved new best model")
 
-# 6. Evaluation
-model.eval()
-with torch.no_grad():
-    test_outputs = model(X_test_tensor)
-    _, predicted = torch.max(test_outputs, 1)
+# Classification report
+print("\n📊 Classification Report:")
+print(classification_report(y_true, y_pred, target_names=class_names))
 
-# Print classification report
-print("\nClassification Report:")
-print(classification_report(y_test_tensor.numpy(), predicted.numpy(), target_names=le.classes_))
-
-
-# Save the model and label encoder
-MODEL_PATH = "genre_classifier.pth"
-ENCODER_PATH = "label_encoder.npy"
-
-# Save model state dict
-torch.save(model.state_dict(), MODEL_PATH)
-
-# Save label encoder classes
-np.save(ENCODER_PATH, le.classes_)
-
-print(f"\n✅ Model saved to {MODEL_PATH}")
-print(f"✅ Label encoder saved to {ENCODER_PATH}")
+#np.save("model/saved/class_names.npy", class_names)
