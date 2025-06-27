@@ -5,7 +5,7 @@ This project is an end-to-end **music genre classification system** built with:
 - **React + Next.js + TypeScript** frontend for uploading `.mp3`/`.wav` files
 - **FastAPI** backend that processes the audio and runs inference
 - A custom-trained **CNN model in PyTorch** that classifies songs into one of 10 genres
-- Fully containerized with **Docker** (optional)
+- Fully containerized with **Docker**
 
 ---
 
@@ -49,7 +49,7 @@ This project is an end-to-end **music genre classification system** built with:
 | Backend      | FastAPI, Python, Librosa, Torch |
 | ML Model     | PyTorch CNN trained on Mel spectrograms |
 | Audio Tools  | Librosa, ffmpeg             |
-| Deployment   | Docker (optional)           |
+| Deployment   | Docker        |
 
 ---
 
